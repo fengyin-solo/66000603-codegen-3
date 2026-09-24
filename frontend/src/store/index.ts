@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import axios from 'axios'
+import type { ApiResponse, Pattern, ImportResult } from '@/types'
 
 export interface AuditResult {
   id: string
@@ -29,7 +30,7 @@ export interface GasIssue {
 export const useAuditStore = defineStore('audit', () => {
   const results = ref<AuditResult[]>([])
   const currentResult = ref<AuditResult | null>(null)
-  const patterns = ref<any[]>([])
+  const patterns = ref<Pattern[]>([])
 
   async function uploadAndAudit(code: string, filename: string) {
     const res = await axios.post<ApiResponse<AuditResult>>('/api/audit', { code, filename })
@@ -39,9 +40,16 @@ export const useAuditStore = defineStore('audit', () => {
   }
 
   async function fetchPatterns() {
-    const res = await axios.get<ApiResponse<any[]>>('/api/patterns')
+    const res = await axios.get<ApiResponse<Pattern[]>>('/api/patterns')
     patterns.value = res.data.data
   }
 
-  return { results, currentResult, patterns, uploadAndAudit, fetchPatterns }
+  async function importPatterns(items: unknown[]): Promise<ImportResult> {
+    const res = await axios.post<ApiResponse<ImportResult>>('/api/patterns/import', { patterns: items })
+    // 合并完成后刷新，保证模式库展示与库中当前规则一致
+    await fetchPatterns()
+    return res.data.data
+  }
+
+  return { results, currentResult, patterns, uploadAndAudit, fetchPatterns, importPatterns }
 })
