@@ -41,17 +41,21 @@
 
 <script setup lang="ts">
 import { ref, computed } from "vue"
+import { useAuditStore } from "@/store"
+import type { Pattern } from "@/patterns"
+
+const store = useAuditStore()
 
 const contractCode = ref(`// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
 contract SimpleBank {
     mapping(address => uint) public balances;
-    
+
     function deposit() public payable {
         balances[msg.sender] += msg.value;
     }
-    
+
     function withdraw(uint amount) public {
         require(balances[msg.sender] >= amount);
         (bool success,) = msg.sender.call{value: amount}("");
@@ -78,31 +82,67 @@ const scoreGrade = computed(() => {
   return "Poor"
 })
 
+/** 内置规则的修复建议；导入进来的自定义规则没有专属建议时使用兜底文案 */
+const SUGGESTIONS: Record<string, string> = {
+  "重入攻击": "使用 Checks-Effects-Interactions 模式，或使用 ReentrancyGuard 修饰符。",
+  "整数溢出": "使用 SafeMath 库或在 Solidity 0.8+ 环境中编译。",
+  "未授权访问": "添加 onlyOwner 或自定义访问控制修饰符。",
+  "自杀指令": "谨慎使用 selfdestruct，确保有正当的业务需求。",
+  "tx.origin钓鱼": "使用 msg.sender 代替 tx.origin 进行身份验证。",
+  "精确度损失": "先乘后除，使用高精度计算避免精度损失。",
+}
+
+interface FoundVuln {
+  type: string
+  severity: string
+  line: number
+  description: string
+  suggestion: string
+}
+
+/**
+ * 用漏洞模式库（两个页面共用的同一份定义）扫描代码。
+ * 按规则库中的顺序逐条匹配，结果按行号展示。
+ */
+function detectWithPatterns(code: string): FoundVuln[] {
+  const vulns: FoundVuln[] = []
+  const seen = new Set<string>()
+  store.patterns.forEach((p: Pattern) => {
+    let re: RegExp
+    try {
+      re = new RegExp(p.regex, "g")
+    } catch {
+      // 规则库中的正则均经过校验，导入的非法正则也已被拦截
+      return
+    }
+    let m: RegExpExecArray | null
+    while ((m = re.exec(code)) !== null) {
+      const line = code.slice(0, m.index).split("\n").length
+      const dedupeKey = `${p.name}@${line}`
+      if (!seen.has(dedupeKey)) {
+        seen.add(dedupeKey)
+        vulns.push({
+          type: p.name,
+          severity: p.severity,
+          line,
+          description: p.description,
+          suggestion: SUGGESTIONS[p.name] ?? "请根据业务场景复核该规则命中的位置并做相应加固。",
+        })
+      }
+      // 防止零宽匹配导致死循环
+      if (m.index === re.lastIndex) re.lastIndex += 1
+    }
+  })
+  return vulns.sort((a, b) => a.line - b.line)
+}
+
 async function runAudit() {
   isAuditing.value = true
   await new Promise(r => setTimeout(r, 1500))
-  
-  // Simulate vulnerability detection
-  const vulns = []
-  if (contractCode.value.includes("msg.sender.call")) {
-    vulns.push({
-      type: "重入攻击 (Reentrancy)",
-      severity: "critical",
-      line: contractCode.value.split("\n").findIndex(l => l.includes("msg.sender.call")) + 1,
-      description: "使用了低级的 call() 接收ETH，存在重入攻击风险。攻击者可通过恶意合约反复调用提款函数。",
-      suggestion: "使用 Checks-Effects-Interactions 模式，或使用 ReentrancyGuard 修饰符。"
-    })
-  }
-  if (contractCode.value.includes("require(balances")) {
-    vulns.push({
-      type: "整数溢出 (Integer Overflow)",
-      severity: "high",
-      line: 1,
-      description: "Solidity 0.8以下版本未启用溢出检查，需注意。",
-      suggestion: "使用 SafeMath 库或在 Solidity 0.8+ 环境中编译。"
-    })
-  }
-  
+
+  // 与漏洞模式库共用同一份规则定义扫描
+  const vulns = detectWithPatterns(contractCode.value)
+
   result.value = {
     score: vulns.length === 0 ? 95 : Math.max(20, 85 - vulns.length * 25),
     vulnerabilities: vulns,
